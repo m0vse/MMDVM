@@ -40,6 +40,11 @@ BINELF_F7=mmdvm_f7.elf
 BINHEX_F7=mmdvm_f7.hex
 BINBIN_F7=mmdvm_f7.bin
 
+GPIO_BASE := $(shell cat /sys/class/gpio/gpiochip*/base 2>/dev/null | sort -n | head -1)
+GPIO_BASE := $(if $(GPIO_BASE),$(GPIO_BASE),0)
+GPIO20 := $(shell expr $(GPIO_BASE) + 20)
+GPIO21 := $(shell expr $(GPIO_BASE) + 21)
+
 # Header directories
 INC_F4= . $(F4_LIB_PATH)/CMSIS/Include/ $(F4_LIB_PATH)/Device/ $(F4_LIB_PATH)/STM32F4xx_StdPeriph_Driver/include/
 INCLUDES_F4=$(INC_F4:%=-I%)
@@ -367,12 +372,12 @@ endif
 
 deploy-pi:
 ifneq ($(wildcard /usr/local/bin/stm32flash),)
-	-/usr/local/bin/stm32flash -i 20,-21,21:-20,21 /dev/ttyAMA0
+	-/usr/local/bin/stm32flash -i $(GPIO20),-$(GPIO21),$(GPIO21):-$(GPIO20),$(GPIO21) /dev/ttyAMA0
 	/usr/local/bin/stm32flash -v -w bin/$(BINBIN_F4) -g 0x0 -R /dev/ttyAMA0
 endif
 
 ifneq ($(wildcard /usr/bin/stm32flash),)
-	-/usr/bin/stm32flash -i 20,-21,21:-20,21 /dev/ttyAMA0
+	-/usr/bin/stm32flash -i $(GPIO20),-$(GPIO21),$(GPIO21):-$(GPIO20),$(GPIO21) /dev/ttyAMA0
 	/usr/bin/stm32flash -v -w bin/$(BINBIN_F4) -g 0x0 -R /dev/ttyAMA0
 endif
 
@@ -383,11 +388,11 @@ deploy-eda446: deploy-pi
 
 deploy-pi-f7:
 ifneq ($(wildcard /usr/local/bin/stm32flash),)
-	-/usr/local/bin/stm32flash -i 20,-21,21:-20,21 /dev/ttyAMA0
+	-/usr/local/bin/stm32flash -i $(GPIO20),-$(GPIO21),$(GPIO21):-$(GPIO20),$(GPIO21) /dev/ttyAMA0
 	/usr/local/bin/stm32flash -v -w bin/$(BINBIN_F7) -g 0x0 -R /dev/ttyAMA0
 
 else ifneq ($(wildcard /usr/bin/stm32flash),)
-	-/usr/bin/stm32flash -i 20,-21,21:-20,21 /dev/ttyAMA0
+	-/usr/bin/stm32flash -i $(GPIO20),-$(GPIO21),$(GPIO21):-$(GPIO20),$(GPIO21) /dev/ttyAMA0
 	/usr/bin/stm32flash -v -w bin/$(BINBIN_F7) -g 0x0 -R /dev/ttyAMA0
 endif
 
