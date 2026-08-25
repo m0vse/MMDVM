@@ -27,7 +27,8 @@ const uint16_t FM_TX_BLOCK_SIZE = 100U;
 const uint16_t FM_SERIAL_BLOCK_SIZE = 80U;//this is the number of sample pairs to send over serial. One sample pair is 3bytes.
                                           //three times this value shall never exceed 252
 const uint16_t FM_SERIAL_BLOCK_SIZE_BYTES = FM_SERIAL_BLOCK_SIZE * 3U;
-
+const uint16_t FM_LINK_EXT_GAP_MS = 60U;// How long a link-mode external-audio underrun is tolerated before it is
+                                        // treated as a real end of transmission (see linkStateMachine()).
 const uint8_t FS_LISTENING         = 0U;
 const uint8_t FS_KERCHUNK_RF       = 1U;
 const uint8_t FS_RELAYING_RF       = 2U;
@@ -62,10 +63,17 @@ m_ackMinTimer(),
 m_ackDelayTimer(),
 m_hangTimer(),
 m_reverseTimer(),
+m_extGapTimer(),
 m_needReverse(false),
 m_filterStage1(  724,   1448,   724, 32768, -37895, 21352),//3rd order Cheby Filter 300 to 2700Hz, 0.2dB passband ripple, sampling rate 24kHz
 m_filterStage2(32768,      0,-32768, 32768, -50339, 19052),
 m_filterStage3(32768, -65536, 32768, 32768, -64075, 31460),
+m_dsFilterStage1(m_filterStage1),//same coefficients, separate state
+m_dsFilterStage2(m_filterStage2),
+m_dsFilterStage3(m_filterStage3),
+m_usFilterStage1(m_filterStage1),//same coefficients, separate state
+m_usFilterStage2(m_filterStage2),
+m_usFilterStage3(m_filterStage3),
 m_blanking(),
 m_accessMode(1U),
 m_linkMode(false),
@@ -85,6 +93,7 @@ m_rssiAccum(0U),
 m_rssiCount(0U)
 {
   m_reverseTimer.setTimeout(0U, 150U);
+  m_extGapTimer.setTimeout(0U, FM_LINK_EXT_GAP_MS);
 
   insertDelay(100U);
 }
@@ -119,6 +128,7 @@ void CFM::repeaterSamples(bool cos, q15_t* samples, const uint16_t* rssi, uint8_
 
     q15_t currentExtSample;
     bool inputExt = m_inputExtRB.getSample(currentExtSample);//always consume the external input data so it does not overflow
+    currentExtSample = m_usFilterStage3.filter(m_usFilterStage2.filter(m_usFilterStage1.filter(currentExtSample)));
     inputExt = inputExt && m_extEnabled;
 
     switch (m_accessMode) {
@@ -200,8 +210,10 @@ void CFM::repeaterSamples(bool cos, q15_t* samples, const uint16_t* rssi, uint8_
     if (m_duplex) {
       if (m_state == FS_RELAYING_RF || m_state == FS_KERCHUNK_RF || m_state == FS_RELAYING_EXT || m_state == FS_KERCHUNK_EXT) {
         currentSample = m_blanking.process(currentSample);
-        if (m_extEnabled && (m_state == FS_RELAYING_RF || m_state == FS_KERCHUNK_RF))
-          m_downSampler.addSample(currentSample);
+        if (m_extEnabled && (m_state == FS_RELAYING_RF || m_state == FS_KERCHUNK_RF)) {
+          q15_t dsSample = m_dsFilterStage3.filter(m_dsFilterStage2.filter(m_dsFilterStage1.filter(currentSample)));
+          m_downSampler.addSample(dsSample);
+        }
 
         currentSample *= currentBoost;
       } else {
@@ -211,9 +223,11 @@ void CFM::repeaterSamples(bool cos, q15_t* samples, const uint16_t* rssi, uint8_
         if (m_state == FS_RELAYING_EXT || m_state == FS_KERCHUNK_EXT) {
           currentSample *= currentBoost;
         } else {
-          if (m_extEnabled && (m_state == FS_RELAYING_RF || m_state == FS_KERCHUNK_RF))
-            m_downSampler.addSample(currentSample);
-          continue; 
+          if (m_extEnabled && (m_state == FS_RELAYING_RF || m_state == FS_KERCHUNK_RF)) {
+            q15_t dsSample = m_dsFilterStage3.filter(m_dsFilterStage2.filter(m_dsFilterStage1.filter(currentSample)));
+            m_downSampler.addSample(dsSample);
+          }
+          continue;
         }
     }
 
@@ -250,14 +264,17 @@ void CFM::linkSamples(bool cos, q15_t* samples, uint8_t length)
 
   uint8_t i = 0U;
   for (; i < length; i++) {
-    // ARMv7-M has hardware integer division 
     q15_t currentRFSample = q15_t((q31_t(samples[i]) << 8) / m_rxLevel);
 
     if (m_noiseSquelch)
       cos = m_squelch.process(currentRFSample);
 
-    q15_t currentExtSample;
+    // Zero-initialized: getSample() leaves this untouched on underrun, and
+    // with the ext-gap debounce below, m_extSignal can now stay true for a
+    // few samples past that point
+    q15_t currentExtSample = 0;
     bool inputExt = m_inputExtRB.getSample(currentExtSample);//always consume the external input data so it does not overflow
+    currentExtSample = m_usFilterStage3.filter(m_usFilterStage2.filter(m_usFilterStage1.filter(currentExtSample)));
     inputExt = inputExt && m_extEnabled;
 
     switch (m_accessMode) {
@@ -327,7 +344,8 @@ void CFM::linkSamples(bool cos, q15_t* samples, uint8_t length)
 
     if (m_rfSignal && m_extEnabled) {
       q15_t currentSample = m_blanking.process(currentRFSample);
-      m_downSampler.addSample(currentSample);
+      q15_t dsSample = m_dsFilterStage3.filter(m_dsFilterStage2.filter(m_dsFilterStage1.filter(currentSample)));
+      m_downSampler.addSample(dsSample);
     }
 
     if (!m_extSignal)
@@ -407,6 +425,12 @@ void CFM::reset()
   m_inputExtRB.reset();
 
   m_downSampler.reset();
+  m_dsFilterStage1.reset();
+  m_dsFilterStage2.reset();
+  m_dsFilterStage3.reset();
+  m_usFilterStage1.reset();
+  m_usFilterStage2.reset();
+  m_usFilterStage3.reset();
   m_squelch.reset();
   
   m_needReverse = false;
@@ -601,6 +625,7 @@ void CFM::clock(uint8_t length)
   m_ackDelayTimer.clock(length);
   m_hangTimer.clock(length);
   m_reverseTimer.clock(length);
+  m_extGapTimer.clock(length);
 }
 
 void CFM::listeningStateDuplex(bool validRFSignal, bool validExtSignal)
@@ -1231,6 +1256,12 @@ void CFM::linkStateMachine(bool validRFSignal, bool validExtSignal)
     m_extSignal = true;
   }
 
+  if (validExtSignal && m_extGapTimer.isRunning()) {
+    // Recovered before the gap timer committed to a real loss below --
+    // m_extSignal was never flipped, so there is nothing else to undo.
+    m_extGapTimer.stop();
+  }
+
   if (!validRFSignal && m_rfSignal) {
     io.setDecode(false);
     io.setADCDetection(false);
@@ -1248,14 +1279,28 @@ void CFM::linkStateMachine(bool validRFSignal, bool validExtSignal)
   }
 
   if (!validExtSignal && m_extSignal) {
-    if (!m_rfSignal) {
-      DEBUG1("State to LISTENING");
-      m_state = FS_LISTENING;
-      serial.writeFMStatus(m_state);
-    }
+    // A missed/late sample used to flip m_extSignal false right here, on
+    // the very first bad sample, with zero debounce -- that is what
+    // actually keys the transmitter off (IO::process() drops PTT the
+    // instant the downstream TX buffer runs dry, see IO.cpp). A gap well
+    // under FM_LINK_EXT_GAP_MS is less offensive than the PTT
+    // drop-and-rekey it triggers. Give it a short grace period
+    // mirroring the RELAYING_EXT/RELAYING_WAIT_EXT pattern the
+    // non-link duplex/simplex paths already use for exactly this
+    // situation (see relayingExtStateDuplex()/relayingExtWaitStateDuplex()).
+    if (!m_extGapTimer.isRunning()) {
+      m_extGapTimer.start();
+    } else if (m_extGapTimer.hasExpired()) {
+      if (!m_rfSignal) {
+        DEBUG1("State to LISTENING");
+        m_state = FS_LISTENING;
+        serial.writeFMStatus(m_state);
+      }
 
-    m_needReverse = true;
-    m_extSignal   = false;
+      m_needReverse = true;
+      m_extSignal   = false;
+      m_extGapTimer.stop();
+    }
   }
 }
 
